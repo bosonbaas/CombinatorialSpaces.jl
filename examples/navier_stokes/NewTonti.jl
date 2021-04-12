@@ -150,6 +150,34 @@ module TontiDiagrams
     end
   end
 
+  function add_time_dep!(td, deriv_sym::Symbol, integ_sym::Symbol)
+    deriv = findfirst(v->v==deriv_sym, td[:symbol])
+    integ = findfirst(v->v==integ_sym, td[:symbol])
+
+    add_part!(td, :TD, integ=integ, deriv=deriv)
+  end
+
+  function add_bc!(td, var_sym, func)
+    var = findfirst(v->v==var_sym, td[:symbol])
+    add_part!(td, :BC, bcfunc=func, bcv=var)
+  end
+
+  # Note: This function can be made more efficient if combined with existing
+  # transformations.
+  # e.g. Advection-diffusion can be merged after the initial wedge
+  # product/coboundary operator
+  #
+  # Currently only defined on primal complices (can this be applied to dual
+  # complices?)
+  function add_laplacian!(td, sd, dom_sym, codom_sym; coef=1)
+    dom = findfirst(v->v==dom_sym, td[:symbol])
+    codom = findfirst(v->v==codom_sym, td[:symbol])
+
+    lap_op = laplace_beltrami(Val{td[dom,:dimension]},sd)
+    func(x,y) = (x .= coef * (lap_op*y))
+    add_transition!(td, [dom_sym], func, [codom_sym])
+  end
+
   function init_mem(td, s::EmbeddedDeltaSet1D)
     # Fill out this function
   end
