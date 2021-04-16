@@ -8,7 +8,14 @@ module TontiDiagrams
   using Catlab.Programs
   using Catlab.WiringDiagrams
   using CombinatorialSpaces
-  
+  using CombinatorialSpaces: ⋆
+  using GeometryBasics
+
+  export TontiDiagram, Space, add_variables!, add_derivatives!, add_time_dep!,
+          add_laplacian!, add_transition!, add_derivative!, add_variable!, add_bc!,
+          vectorfield
+
+  # Rendered as: https://q.uiver.app/?q=WzAsMTAsWzEsMiwiTyJdLFsyLDIsIkkiXSxbMSwxLCJWIl0sWzEsMywiVCJdLFswLDIsIkJDIl0sWzAsMCwiVEQiXSxbMCwzLCJGdW5jIl0sWzMsMCwiQ29tcCJdLFszLDEsIkRpbWVuc2lvbiJdLFszLDIsIkxhYmVsIl0sWzQsMiwiYmN2Il0sWzUsMiwiaW50ZWciLDAseyJvZmZzZXQiOi0xfV0sWzAsMiwib3YiLDFdLFswLDMsIm90IiwxXSxbMSwyLCJpdiIsMV0sWzEsMywiaXQiLDFdLFs1LDIsImRlcml2IiwyLHsib2Zmc2V0IjoxfV0sWzQsNiwiYmNmdW5jIiwyLHsic3R5bGUiOnsiYm9keSI6eyJuYW1lIjoiZGFzaGVkIn19fV0sWzMsNiwidGZ1bmMiLDAseyJzdHlsZSI6eyJib2R5Ijp7Im5hbWUiOiJkYXNoZWQifX19XSxbMiw5LCJzeW1ib2wiLDEseyJzdHlsZSI6eyJib2R5Ijp7Im5hbWUiOiJkYXNoZWQifX19XSxbMiw4LCJkaW1lbnNpb24iLDEseyJzdHlsZSI6eyJib2R5Ijp7Im5hbWUiOiJkYXNoZWQifX19XSxbMiw3LCJjb21wbGV4IiwxLHsic3R5bGUiOnsiYm9keSI6eyJuYW1lIjoiZGFzaGVkIn19fV1d
   @present TheoryTontiDiagram(FreeSchema) begin
     Func::Data
     Comp::Data
@@ -38,6 +45,47 @@ module TontiDiagrams
     symbol::Attr(V, Label)
   end
 
+  # Structure to "cache" these values. Ideally these would be stored in the
+  # Petri net simulation layer, and initialized when the simulation layer
+  # is constructed
+  struct Space
+    s::EmbeddedDeltaSet2D
+    sd::EmbeddedDeltaDualComplex2D
+    boundary
+    hodge
+    laplacian
+    lie
+  end
+
+  function Space(s::EmbeddedDeltaSet2D{O, P}) where {O, P}
+    sd = EmbeddedDeltaDualComplex2D{O, Float64, Point{3, Float64}}(s)
+    subdivide_duals!(sd, Barycenter())
+
+    boundary = Array{typeof(d(0,s)), 2}(undef, 2,2) 
+    boundary[[1,2,3,4]] .= [d(0,s), dual_derivative(0,sd), d(1,s), dual_derivative(1,sd)]
+
+    hodge = Array{typeof(⋆(0,sd)), 2}(undef, 2,3) 
+    hodge[[1,2,3,4,5,6]] .= [⋆(0,sd), inv(⋆(2,sd)), ⋆(1,sd), -1 .* inv(⋆(1,sd)), ⋆(2,sd), inv(⋆(0,sd))]
+    
+    # TODO:
+    # Add Laplacian and Lie operators here
+    laplacian  = Array{typeof(hodge[1,2]*boundary[1,1]),1}(undef,3)
+    laplacian[1] = hodge[2,3]*boundary[2,2]*hodge[1,2]*boundary[1,1]
+
+    laplacian[2] = hodge[2,2]*boundary[2,1]*hodge[1,3]*boundary[1,2] .+ 
+                   boundary[1,1]*hodge[2,3]*boundary[2,2]*hodge[1,2]
+    laplacian[3] = boundary[1,2]*hodge[2,2]*boundary[2,1]*hodge[1,3]
+    
+    lie = [
+          ]
+    Space(s, sd, boundary, hodge, laplacian, nothing)
+  end
+
+  # TODO:
+  # Make more petri-style simulation ACSet
+  #
+  # Make more Tonti-aware ACSet w/ support of multiple complexes
+
   # These functions are necessary for defining a TontiDiagram data structure from
   # the ACSet
   const AbstractTontiDiagram = AbstractACSetType(TheoryTontiDiagram)
@@ -56,15 +104,9 @@ module TontiDiagrams
   end==#
 
   TontiDiagram() = TontiDiagram{Function, Bool, Int64, Symbol}()
-  
-  # This can later be used to pre-compute the boundary and hodge-star
-  # operators, so that we only need one of each for computation
-  TontiDiagram(s::EmbeddedDeltaSet2D, sd) = begin
-    TontiDiagram()  
-  end
 
-  function vectorfield!(td, s)
-    v_mem, t_mem = init_mem(td, s)
+  function vectorfield(td, sp::Space)
+    v_mem, t_mem = init_mem(td, sp)
     dg = Graph(td)
 
     order = topological_sort(dg)
@@ -119,9 +161,14 @@ module TontiDiagrams
     input_vars, system
   end
 
-  function add_variables!(td, symbols::Array{Symbol},
-                          dimensions::Array{Int64}, complices::Array{Bool})
-    add_parts!(td, :V, length(symbols),symbol=symbols, dimension=dimensions, complex=complices)
+  function add_variable!(td, symbol::Symbol, dimension::Int64, complex::Bool)
+    add_part!(td, :V,symbol=symbol, dimension=dimension, complex=complex)
+  end
+
+  function add_variables!(td, vars::Tuple{Symbol, Int64, Bool}...)
+    for v in vars
+      add_variable!(td, v...)
+    end
   end
 
   function add_transition!(td, dom_sym::Array{Symbol,1}, func, codom_sym::Array{Symbol,1})
@@ -132,21 +179,21 @@ module TontiDiagrams
     add_parts!(td, :O, length(codom), ov=codom, ot=t)
   end
 
-  function add_derivative!(td, s, sd, dom_sym, codom_sym)
+  function add_derivative!(td, sp, dom_sym, codom_sym)
     dom = findfirst(v->v==dom_sym, td[:symbol])
     codom = findfirst(v->v==codom_sym, td[:symbol])
 
     # TODO:
     # Add tests for proper dimensions, complexes, etc.
     # This will later be replaced as we pre-initialize all boundary operators
-    bound = td[dom,:complex] ? d(td[dom,:dimension],s) : dual_derivative(td[dom,:dimension],sd)
+    bound = sp.boundary[(td[dom,:complex] ? 1 : 2), td[dom,:dimension]+1]
     func(x,y) = (x.=bound*y)
     add_transition!(td, [dom_sym],func,[codom_sym])
   end
 
-  function add_derivatives!(td, s, sd, vars::Pair{Symbol, Symbol}...)
+  function add_derivatives!(td, sp, vars::Pair{Symbol, Symbol}...)
     for v in vars
-      add_derivative!(td, s, sd, v[1],v[2])
+      add_derivative!(td, sp, v[1],v[2])
     end
   end
 
@@ -169,11 +216,12 @@ module TontiDiagrams
   #
   # Currently only defined on primal complices (can this be applied to dual
   # complices?)
-  function add_laplacian!(td, sd, dom_sym, codom_sym; coef=1)
+  function add_laplacian!(td, sp, dom_sym, codom_sym; coef=1)
+    sd = sp.sd
     dom = findfirst(v->v==dom_sym, td[:symbol])
     codom = findfirst(v->v==codom_sym, td[:symbol])
 
-    lap_op = laplace_beltrami(Val{td[dom,:dimension]},sd)
+    lap_op = sp.laplacian[td[dom,:dimension]+1] # laplace_beltrami(Val{td[dom,:dimension]},sd)
     func(x,y) = (x .= coef * (lap_op*y))
     add_transition!(td, [dom_sym], func, [codom_sym])
   end
@@ -182,7 +230,8 @@ module TontiDiagrams
     # Fill out this function
   end
 
-  function init_mem(td, s::EmbeddedDeltaSet2D)
+  function init_mem(td, sp::Space)
+    s = sp.s
     primal_size = [nv(s), ne(s), ntriangles(s)]
     dual_size   = [ntriangles(s), ne(s), nv(s)]
 
